@@ -1,0 +1,1 @@
+mq_api_key <- function() return("YOUR_API_KEY")
