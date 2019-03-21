@@ -1,4 +1,4 @@
 .Rproj.user
 sandbox/
 .DS_Store
-private/keys.R
+private/api_key.R
