@@ -139,6 +139,12 @@ nbhd_map <- nbhd_geojson %>%
            fct_relevel(c("Manhattan", "Bronx", "Brooklyn", "Queens")))
 
 
+
+##  ............................................................................
+##  Neighborhood coding using sp::over                                      ####
+
+
+
 ##  ............................................................................
 ##  Data inspection                                                         ####
 
