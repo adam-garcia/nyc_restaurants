@@ -2,3 +2,4 @@
 sandbox/
 .DS_Store
 private/api_key.R
+data/nyc_locs.csv
