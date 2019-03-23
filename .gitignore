@@ -1,7 +1,7 @@
 .Rproj.user
 sandbox/
 .DS_Store
-private/api_key.R
+private/
 data/nyc_locs.csv
 README.html
 data/DOHMH_New_York_City_Restaurant_Inspection_Results.csv
