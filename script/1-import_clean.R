@@ -20,8 +20,9 @@ library(broom)
 library(rgdal)
 library(feather)
 
-# ggplot2 theme
+# ggplot2 customization
 theme_set(theme_minimal())
+scale_fill_continuous <- function(...) scale_fill_viridis()
 
 # metadata environment
 meta <- new.env()
@@ -129,7 +130,8 @@ nbhd_geojson <- readOGR(
   verbose = F
 )
 
-# Create dictionary for neighborhood name
+
+# Create dictionary for neighborhood name and geographic area
 nbhd_dict <- nbhd_geojson@data %>% 
   as_tibble() %>% 
   mutate(group = nbhd_geojson %>% 
@@ -137,7 +139,24 @@ nbhd_dict <- nbhd_geojson@data %>%
            group_by(group) %>% 
            pull(group) %>% 
            levels() %>% 
-           as.character())
+           as.character(),
+         nbhd = neighborhood) %>% 
+  # Pull polygon area and convert to square miles
+  bind_cols(
+    nbhd_geojson@polygons %>%
+      map_df(function(poly){
+        tibble(nbhd_poly_area = poly@area,
+               # From wikipedia, central park is 3.4km^2, or roughly 1.3mi^2
+               # From our data, the polygon area for Central Park is ~0.00038
+               # Use the ratio as a conversion factor
+               nbhd_area = nbhd_poly_area * (1.3 / cenpark_area))
+      })
+  )
+#> sum(nbhd_dict$nbhd_area)
+#> [1] 747.9377
+# That's not too far off the 783.84 km^2 land area listed on wikipedia
+# Since a good portion of the land area is non-neighborhood park area,
+# e.g., Van Cortlandt park, I'm not too worried about the ~5% difference
 
 # Create ggplot-ready table of lat-long pairs
 nbhd_map <- nbhd_geojson %>% 
@@ -256,11 +275,14 @@ proj4string(nyc_sp) <- proj4string(nbhd_geojson)
 
 nyc_map <- nyc_locs %>% 
   filter(!is.na(lat)) %>% 
-  mutate(nbhd = over(nyc_sp, nbhd_geojson)$neighborhood)
+  mutate(nbhd = over(nyc_sp, nbhd_geojson)$neighborhood) %>% 
+  left_join(
+    nbhd_dict %>% 
+      select(nbhd, nbhd_poly_area, nbhd_area)
+  )
 
 ##  ............................................................................
 ##  Data inspection                                                         ####
-
 
 # First, let's explore our dataset
 
