@@ -274,7 +274,8 @@ proj4string(nyc_map_sp) <- CRS("+proj=longlat +datum=WGS84")
 
 nyc_map_xy <- spTransform(nyc_map_sp, CRS(paste0("+proj=utm +zone=", z, " ellps=WGS84")))
 
-# First, let's explore our dataset
+## find the nearest neighbor in subway_xy@coords for each nyc_map_sp@coords
+nyc_nn <- nn2(subway_xy@coords, nyc_map_xy@coords, 1)
 
 # nn2 returns a list with the subway stop index and distance in meters for each 
 # restaurant
