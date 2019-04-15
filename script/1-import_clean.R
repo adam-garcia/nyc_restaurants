@@ -19,6 +19,8 @@ library(rvest)
 library(broom)
 library(rgdal)
 library(feather)
+library(leaflet)
+library(RANN)
 
 # ggplot2 customization
 theme_set(theme_minimal())
@@ -67,9 +69,15 @@ fix_na_cols <- nyc_in %>%
 
 # Do some minimal cleaning
 nyc <- nyc_in %>% 
+  # Deselect grade and grade date for correction
   select(-grade, -grade_date) %>%
   left_join(fix_na_cols) %>%
+  # Filter to restaurants with a current grade
+  filter(!is.na(grade) & grade != "Not Yet Graded") %>% 
   mutate(
+    boro = boro %>% 
+      as.character() %>% 
+      fct_relevel("Manhattan", "Bronx", "Brooklyn", "Queens", "Staten Island"),
     street = str_replace_all(street, "\\s{2,}", " "),
     place = str_c(building, street, sep = " "),
     address = str_c(place, boro, "NY", zipcode, sep = ", "),
@@ -93,7 +101,12 @@ nyc <- nyc_in %>%
   group_by(camis) %>% 
   arrange(desc(inspection_date)) %>% 
   slice(1) %>% 
-  ungroup()
+  ungroup() %>% 
+  # From the guidelines: 0 < A < 13 < B < 28 < C. Grade pending: Z
+  filter((grade == "A" & score < 14) | 
+         (grade == "B" & score > 13) |
+         (grade == "C" & score > 27) |
+         (grade == "Z"))
 
 ##  ............................................................................
 ##  City of New York borough spatial data                                   ####
@@ -105,7 +118,7 @@ boro_sp <- readOGR("sandbox/geo_export_bf24ed11-bed6-49a3-8af5-009cdbec9260.shp"
 boro_sp@data$id <- rownames(boro_sp@data)
 
 # Create mapping dataframe
-boro_map <- fortify(nyc_sp) %>% 
+boro_map <- fortify(boro_sp) %>% 
   mutate(boro_code = group %>% 
            as.character() %>% 
            as.numeric() %>% 
@@ -119,147 +132,43 @@ boro_map <- fortify(nyc_sp) %>%
       fct_relevel("Manhattan", "Bronx", "Brooklyn", "Queens", "Staten Island")
   ))
 
-
 ##  ............................................................................
-##  Pediacities neighborhood spatial data                                   ####
-
-# Read GeoJSON data into Spatial Polygon data frame
-nbhd_geojson <- readOGR(
-  "sandbox/pediacities-nycneighborhoods.geojson", 
-  "OGRGeoJSON",
-  verbose = F
-)
-
-
-# Create dictionary for neighborhood name and geographic area
-nbhd_dict <- nbhd_geojson@data %>% 
-  as_tibble() %>% 
-  mutate(group = nbhd_geojson %>% 
-           fortify() %>% 
-           group_by(group) %>% 
-           pull(group) %>% 
-           levels() %>% 
-           as.character(),
-         nbhd = neighborhood) %>% 
-  # Pull polygon area and convert to square miles
-  bind_cols(
-    nbhd_geojson@polygons %>%
-      map_df(function(poly){
-        tibble(nbhd_poly_area = poly@area,
-               # From wikipedia, central park is 3.4km^2, or roughly 1.3mi^2
-               # From our data, the polygon area for Central Park is ~0.00038
-               # Use the ratio as a conversion factor
-               nbhd_area = nbhd_poly_area * (1.3 / cenpark_area))
-      })
-  )
-#> sum(nbhd_dict$nbhd_area)
-#> [1] 747.9377
-# That's not too far off the 783.84 km^2 land area listed on wikipedia
-# Since a good portion of the land area is non-neighborhood park area,
-# e.g., Van Cortlandt park, I'm not too worried about the ~5% difference
-
-# Create ggplot-ready table of lat-long pairs
-nbhd_map <- nbhd_geojson %>% 
-  broom::tidy() %>% 
-  left_join(nbhd_dict) %>% 
-  mutate(group = as.numeric(group) %>% floor(),
-         nbhd_boro = borough %>% 
-           fct_relevel(c("Manhattan", "Bronx", "Brooklyn", "Queens"))) %>% 
-  rename(nbhd = neighborhood)
-
-##  ............................................................................
-##  MapQuest Geocoding                                                      ####
-
-# MapQuest limits to 15,000 requests per key
-# Manhattan and the Bronx have 12,585 entries, so we'll split there
-mq_split <- nyc %>% 
-  mutate(manbx = boro %in% c("Manhattan", "Bronx")) %>% 
-  split(.$manbx) %>% 
-  # clean_names()
-  set_names(c("bknqs", "manbx"))
+##  HERE Geocoding                                                          ####
 
 # Load api keys from private directory
 source("private/api_key.R")
 
-# Function get_mq_loc
-## Mapquest location scrape function
-# Arguments
-## loc: Address or address-like location to geocode
-## id: identifier value for relational merging
-## boro: which borough group api key to use
-get_mq_loc <- function(loc, id, boro) {
-  # Return NA lat/lng for missing addresses
-  if(is.na(loc)) {
-    tibble(camis = id, lat = NA, lng = NA, status = "NA Address") %>% 
-      return()
-  }
-  # URL Template
-  mq_url <-glue("http://www.mapquestapi.com/geocoding/v1/address?key=",
-                "{get_mq_key(boro)}&location={loc}&maxResults=1") %>% 
-      URLencode()
-  # Perform the request
-  request <- mq_url %>% 
-    httr::GET() %>% 
-    content("text") %>% 
-    fromJSON()
-  # Only parse the data if the request was successful
-  if(request$info$statuscode == 0) {
-    # Pull lat/lng field
-    request %>% 
-      .[["results"]] %>% 
-      .[["locations"]] %>% 
-      first() %>% 
-      .[["latLng"]] %>% 
-      as_tibble() %>% 
-      mutate(camis = id, status = "Success") %>% 
-      rename(long = lng) %>% 
-      return()
-  } else {
-    tibble(
-      camis = id, 
-      long = NA, lat = NA, 
-      stauts = request$info$statuscode
-    ) %>% 
-      return()
-  }
-}
-
-
-### . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ..
-### Map over locations by borough                                           ####
 # Only run if it hasn't been run before
 if(!file.exists("data/nyc_locs.csv")) {
-  # Manhattan and the Bronx
-  manbx_start <- Sys.time()
-  manbx_locs <- list(
-    mq_split$manbx$address,
-    mq_split$manbx$camis,
-    "manbx"
-  ) %>% 
-    pmap_df(get_mq_loc)
-  manbx_time <- Sys.time() - manbx_start
+  here_url <- "https://geocoder.api.here.com/6.2/geocode.json"
+  nyc_locs_list <- pmap(
+    list(nyc$camis, nyc$address),
+    function(id, addr) {
+      here_req <- GET(
+        here_url,
+        query = list(
+          app_id = here_creds[["app_id"]],
+          app_code = here_creds[["app_code"]],
+          searchtext = addr
+        )
+      )
+      here_json <- here_req %>%
+        content("text") %>%
+        fromJSON()
+      latlng <- here_json$Response$View$Result[[1]]$Location$DisplayPosition #%>%
+      list(id = id,
+           latlng = latlng)
+    })
   
-  # Brooklyn, Queens, Staten Island
-  bknqs_start <- Sys.time()
-  bknqs_locs <- list(
-    mq_split$bknqs$address,
-    mq_split$bknqs$camis,
-    "bknqs"
-  ) %>% 
-    pmap_df(get_mq_loc)
-  
-  # Some of the geocoding wasn't accurate
-  # Filter to bounding box of our map data to double check
-  bbox <- nbhd_geojson@bbox %>% 
-    as_tibble()
-  
-  # Attach locations to nyc data
-  nyc_locs_in <- bind_rows(manbx_locs, bknqs_locs) %>% 
-    filter(between(long, bbox$min[1], bbox$max[1]),
-           between(lat, bbox$min[2], bbox$max[2]))
-  
-  nyc_locs <- left_join(nyc, nyc_locs_in)
-  
+  nyc_locs <- nyc_locs_list %>% 
+    map_df(function(ll){
+      tibble(
+        camis = ll$id,
+        lat = ll$latlng$Latitude,
+        long = ll$latlng$Longitude
+      )
+    }) %>% 
+    distinct(camis, .keep_all = T)
   # Write geocoded locations to disk
   write_csv(nyc_locs, "data/nyc_locs.csv")
 } else {
@@ -267,86 +176,198 @@ if(!file.exists("data/nyc_locs.csv")) {
 }
 
 ##  ............................................................................
+##  Pediacities neighborhood spatial data                                   ####
+
+# Read GeoJSON data into Spatial Polygon data frame
+nbhd_geojson <- readOGR(
+  "sandbox/nyc_neighborhoods.geojson", 
+  "OGRGeoJSON",
+  verbose = F
+)
+
+##  ............................................................................
 ##  Neighborhood coding using sp::over                                      ####
-nyc_sp <- nyc_locs %>% 
-  filter(!is.na(lat))
+nyc_sp <- nyc_locs 
 coordinates(nyc_sp) <- ~ long + lat
 proj4string(nyc_sp) <- proj4string(nbhd_geojson)
 
-nyc_map <- nyc_locs %>% 
-  filter(!is.na(lat)) %>% 
-  mutate(nbhd = over(nyc_sp, nbhd_geojson)$neighborhood) %>% 
-  left_join(
-    nbhd_dict %>% 
-      select(nbhd, nbhd_poly_area, nbhd_area)
-  )
+nyc_map <- nyc %>% 
+  left_join(nyc_locs) %>% 
+  mutate(nbhd = over(nyc_sp, nbhd_geojson)$ntaname,
+         boro = droplevels(boro, "Missing")) %>% 
+  filter(long <= -73.70001,
+         long >= -74.25559,
+         lat <= 40.91553,
+         lat >= 40.49612)
+
+
 
 ##  ............................................................................
-##  Data inspection                                                         ####
-
-# First, let's explore our dataset
-
-nyc_skim <- skimr::skim(nyc) 
-
-print(nyc_skim)
-
-# Next, let's get into missing data
-nyc_skim %>% 
-  as_tibble() %>% 
-  filter(stat == "missing" | stat == "n") %>% 
-  select(variable, stat, value) %>% 
-  spread(stat, value) %>% 
-  mutate(pct_missing = missing / n) %>% 
-  arrange(desc(pct_missing))
-
-
-
-# Restaurant grades is one of the variables we're most interested in
-# Let's take a look at the nature of those missing values
-
-nyc %>% 
-  mutate(no_grade = is.na(grade) %>% 
-           ifelse("Missing", "Graded")) %>% 
-  count(boro, no_grade) %>% 
-  ggplot(aes(x = boro, y = n, fill = no_grade)) +
-  geom_bar(stat = "identity", position = "fill") +
-  scale_y_continuous(labels = scales::percent) +
-  labs(
-    title = "Missing grades by borough",
-    x = "Borough",
-    y = "Percent",
-    fill = "Restaurant Grade"
-  )
-
-# There doesn't seem to be too much difference
-# Between missingness across boroughs. Let's test!
-nyc %>% 
-  count(boro, no_grade) %>% 
-  spread(no_grade, n) %>% 
-  select(Graded, Missing) %>% 
-  chisq.test()
-
-# Looks like there's a *statistically significant* difference
-# In rating fidelity across brough. What are the numbers, though?
-
-nyc %>% 
-  count(boro, no_grade) %>% 
-  spread(no_grade, n) %>% 
+##  Subway Stop Data                                                        ####
+# https://data.ny.gov/widgets/i9wp-a4ja
+subway <- read_csv("data/subway_stops.csv") %>% 
   clean_names() %>% 
-  mutate(total = graded + missing,
-         missing_pct = scales::percent(missing / total)) %>% 
-  arrange(desc(missing_pct)) %>% 
-  select(boro, missing_pct) %>% 
-  rename(Borough = boro,
-         `Percent Missing` = missing_pct) %>% 
-  DT::datatable(
-    options = list(paging = FALSE,
-                   searching = FALSE)
-  )
+  rename(long = station_longitude,
+         lat = station_latitude) %>% 
+  # Staten Island Railway Stops (from Wikipedia)
+  bind_rows(tribble(
+    ~lat, ~long, ~station_name,
+    40.54043, -74.17840, "Annadale",
+    40.5168, -74.2416, "Arthur Kill",
+    40.55658, -74.13663, "Bay Terrace",
+    40.6215, -74.0715, "Clifton",
+    40.5890, -74.0959, "Dongan Hills",
+    40.5444, -74.1651, "Eltingville",
+    40.55125, -74.15132, "Great Kills",
+    40.5793, -74.1093, "Grant City",
+    40.60347, -74.08378, "Grasmere",
+    40.5336, -74.1919, "Huguenot",
+    40.5838, -74.1030, "Jefferson Avenue",
+    40.5736, -74.1171, "New Dorp",
+    40.5647, -74.1269, "Oakwood Heights",
+    40.5964, -74.0875, "Old Town",
+    40.5224, -74.2179, "Pleasant Plains",
+    40.5254, -74.2003, "Prince's Bay",
+    40.5196, -74.2293, "Richmond Valley",
+    40.643333, -74.074167, "St. George",
+    40.627889, -74.075139, "Stapleton",
+    40.6368, -74.0748, "Tompkinsville",
+    40.5125, -74.2523, "Tottenville"
+  ))
+
+# The NYC Open Data subway dataset doesn't provide a UID
+# We'll need to seed our RNG then generate and assign an identifier
+set.seed(1738)
+subway$station_uid <- ids::random_id(nrow(subway), bytes = 3, use_openssl = F)
+
+subway <- subway %>% 
+  select(station_uid, everything())
+# Confirmation:
+#> (subway %>% distinct(station_uid) %>% nrow()) == nrow(subway)
+#[1] TRUE
 
 ##  ............................................................................
-##  Cuisine is pretty messy, let’s look closer                              ####
- 
-nyc %>% 
-  count(cuisine, sort = T)
+##  Distance to nearest subway stop                                         ####
+# Many thanks to aichao on StackOverflow:
+# https://stackoverflow.com/questions/39454249/checking-whether-coordinates-fall-within-a-given-radius
+
+long2UTM <- function(long) {
+  (floor((long + 180)/6) %% 60) + 1
+}
+## Assuming that all points are within a zone (within 6 degrees in longitude),
+## we use the first FSE's longitude to get the zone.
+z <- long2UTM(nyc_map[1,"long"])
+
+
+## convert the bus lat/long coordinates to UTM for the computed zone
+## using the other Josh O'Brien linked answer
+subway_sp <- subway
+coordinates(subway_sp) <- c("long", "lat")
+proj4string(subway_sp) <- CRS("+proj=longlat +datum=WGS84")
+
+subway_xy <- spTransform(subway_sp, CRS(paste0("+proj=utm +zone=",z," ellps=WGS84")))
+
+## convert the FSE lat/long coordinates to UTM for the computed zone
+nyc_map_sp <- nyc_map
+coordinates(nyc_map_sp) <- c("long", "lat")
+proj4string(nyc_map_sp) <- CRS("+proj=longlat +datum=WGS84")
+
+nyc_map_xy <- spTransform(nyc_map_sp, CRS(paste0("+proj=utm +zone=", z, " ellps=WGS84")))
+
+## find the nearest neighbor in subway_xy@coords for each nyc_map_sp@coords
+nyc_nn <- nn2(subway_xy@coords, nyc_map_xy@coords, 1)
+
+# nn2 returns a list with the subway stop index and distance in meters for each 
+# restaurant
+distance <- tibble(
+  camis = nyc_map$camis,
+  station_uid = subway$station_uid[nyc_nn$nn.idx],
+  dist_m = nyc_nn$nn.dists
+)
+
+nyc_full <- nyc_map %>% 
+  left_join(distance, by = "camis") %>% 
+  left_join(subway, by = "station_uid")
+
+
+
+##  ............................................................................
+##  Summarize to neighborhood level                                         ####
+
+##  ............................................................................
+##  Neighborhood Population Data                                            ####
+
+# https://data.cityofnewyork.us/City-Government/New-York-City-Population-By-Neighborhood-Tabulatio/swpk-hqdp
+
+nbhd_pop <- read_csv(
+  "sandbox/New_York_City_Population_By_Neighborhood_Tabulation_Areas.csv"
+) %>% 
+  clean_names() %>% 
+  arrange(desc(year), nta_name) %>% 
+  distinct(nta_name, .keep_all = T) %>% 
+  filter(nta_code %in% nbhd_geojson@data$ntacode) %>% 
+  select(population, nta_code, nta_name) %>% 
+  mutate(nbhd_code = fct_relevel(nta_code, nbhd_geojson@data$ntacode %>% as.character()),
+         nbhd = fct_relevel(nta_name, nbhd_geojson@data$ntaname %>% as.character()))
+
+
+# Creating summary data frame
+nbhd_summary <- nyc_map %>% 
+  filter(grade %in% c(LETTERS[1:3], "Z")) %>% 
+  mutate(nbhd = fct_explicit_na(nbhd)) %>% 
+  group_by(boro) %>% 
+  mutate(boro_rest_n = n(),
+         boro_pct_a = sum(grade == "A", na.rm = T) / boro_rest_n) %>% 
+  ungroup() %>% 
+  # group_by(boro_rest_n, boro, nbhd) %>% 
+  group_by(nbhd) %>% 
+  summarize(
+    # Carry forward boro summary data
+    boro = boro[1],
+    boro_rest_n = boro_rest_n[1],
+    boro_pct_a = boro_pct_a[1],
+    # Total nyc restaurants
+    nyc_rest_n = nrow(nyc_map),
+    # Restaurants in neighborhood
+    nbhd_rest_n = n(), # Total
+    # Violations and critical violations
+    nbhd_viol_mean = mean(viol, na.rm = T), # Total
+    nbhd_crit_mean = mean(viol_crit, na.rm = T), # Total\
+    # Percent A Grade Rating
+    nbhd_pct_a = sum(grade == "A", na.rm = T) / nbhd_rest_n,
+    # Mean Score
+    nbhd_score_mean = mean(score, na.rm = T),
+    # Cuisine
+    nbhd_cuisine_variety = unique(cuisine) %>% 
+      length() %>% 
+      divide_by(nbhd_rest_n),
+    # Top 10 Cuisine Types, Count
+    nbhd_american_n = sum(cuisine == "American"),
+    nbhd_chinese_n = sum(cuisine == "Chinese"),
+    nbhd_cafe_n = sum(cuisine == "Cafe/Coffee/Tea"),
+    nbhd_pizza_n = sum(cuisine == "Pizza"),
+    nbhd_italian_n = sum(cuisine == "Italian"),
+    nbhd_mexican_n = sum(cuisine == "Mexican"),
+    nbhd_japanese_n = sum(cuisine == "Japanese"),
+    nbhd_latin_n = sum(cuisine == "Latin (Cuban, Dominican, Puerto Rican, South & Central American)"),
+    nbhd_bakery_n = sum(cuisine == "Bakery"),
+    nbhd_caribbean_n = sum(cuisine == "Caribbean"),
+    # Top 10 Cuisine Types, Percent
+    nbhd_american_pct = sum(cuisine == "American") / nbhd_rest_n, # nbhd_american_pct
+    nbhd_chinese_pct = sum(cuisine == "Chinese") / nbhd_rest_n, # nbhd_chinese_pct
+    nbhd_cafe_pct = sum(cuisine == "Cafe/Coffee/Tea") / nbhd_rest_n, # nbhd_cafe_pct
+    nbhd_pizza_pct = sum(cuisine == "Pizza") / nbhd_rest_n, # nbhd_pizza_pct
+    nbhd_italian_pct = sum(cuisine == "Italian") / nbhd_rest_n, # nbhd_italian_pct
+    nbhd_mexican_pct = sum(cuisine == "Mexican") / nbhd_rest_n, # nbhd_mexican_pct
+    nbhd_japanese_pct = sum(cuisine == "Japanese") / nbhd_rest_n, # nbhd_japanese_pct
+    nbhd_latin_pct = sum(cuisine == "Latin (Cuban, Dominican, Puerto Rican, South & Central American)") / nbhd_rest_n, # nbhd_latin_pct
+    nbhd_bakery_pct = sum(cuisine == "Bakery") / nbhd_rest_n, # nbhd_bakery_pct
+    nbhd_caribbean_pct = sum(cuisine == "Caribbean") / nbhd_rest_n # nbhd_caribbean_pct
+  ) %>% 
+  ungroup() %>% 
+  select(nbhd, nyc_rest_n, 
+         starts_with("nbhd_"), everything()) %>% 
+  filter(!is.na(nbhd)) %>% 
+  left_join(nbhd_pop)
+
 

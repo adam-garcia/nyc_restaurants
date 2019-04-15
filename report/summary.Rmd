@@ -1,0 +1,46 @@
+---
+title: "Introduction"
+author: "Adam Garcia"
+date: "4/7/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, message = F, warning = F)
+```
+
+# Introduction
+
+Food! Cuisine! Public Health! Data analysis and plots and stuff! All gravy, I
+dig them all a bunch. I haven't been doing data analysis work for a living for a
+while and I miss it, so I've been looking for (and starting, and not quite 
+finishing) a project that I can use to dive back in. Since this is the first
+post on my [new blog](https://adam-garcia.net), I thought I'd make this a part
+walkthrough, part process notes, part overview.
+
+As a New Yorker for about a year and a half now, one point those interests
+have all intersected is my curiosity from the A-B-C restaurant grades
+posted on all (brick and mortar[^1]) food establishments across the five boroughs.
+They're a tiered letter grade that just about all of us are familiar with: A is
+better than B. B is better than C. "Pending" means a shop is trying to contest
+an unfavorable score and might be offering cheaper food? But it's not clear
+*how* those grades are distinguished? What aspects--good or bad--about an
+establishment's infrastructure and cleanliness contriubte to that final grade,
+and are there any grade differences between boroughs, neighborhoods, or cuisine
+types? I'm so glad you asked, let's find out.
+
+# The Plan
+
+[Nathan Fielder](https://en.wikipedia.org/wiki/Nathan_for_You) among some others
+(say, biostats classes and work experience) have distilled in me the importance
+of going into any project with a comprehensive, well-thought-out plan. The analysis
+process can sometimes get iterative and cyclical, but there are some key 
+processes we can outline from the start: 
+
+1) Identifying the necessary data and sources,
+2) Importing, cleaning, and preparing the data for analysis
+3) Analyzing the data, reporting our findings
+
+
+
+[^1]: The NYC Health Department [recently rolled out](https://www1.nyc.gov/site/doh/about/press/pr2019/letter-grades-for-food-carts-and-trucks.page) the same A-B-C letter grade system, but it's not the exact same as the scoring system used for restaurants, so we'll hold off on them for now.
