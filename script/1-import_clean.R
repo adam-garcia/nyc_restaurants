@@ -119,13 +119,55 @@ boro_map <- fortify(nyc_sp) %>%
       fct_relevel("Manhattan", "Bronx", "Brooklyn", "Queens", "Staten Island")
   ))
 
+##  ............................................................................
+##  HERE Geocoding                                                          ####
+
+# Load api keys from private directory
+source("private/api_key.R")
+
+# Only run if it hasn't been run before
+if(!file.exists("data/nyc_locs.csv")) {
+  here_url <- "https://geocoder.api.here.com/6.2/geocode.json"
+  nyc_locs_list <- pmap(
+    list(nyc$camis, nyc$address),
+    function(id, addr) {
+      here_req <- GET(
+        here_url,
+        query = list(
+          app_id = here_creds[["app_id"]],
+          app_code = here_creds[["app_code"]],
+          searchtext = addr
+        )
+      )
+      here_json <- here_req %>%
+        content("text") %>%
+        fromJSON()
+      latlng <- here_json$Response$View$Result[[1]]$Location$DisplayPosition #%>%
+      list(id = id,
+           latlng = latlng)
+    })
+  
+  nyc_locs <- nyc_locs_list %>% 
+    map_df(function(ll){
+      tibble(
+        camis = ll$id,
+        lat = ll$latlng$Latitude,
+        long = ll$latlng$Longitude
+      )
+    }) %>% 
+    distinct(camis, .keep_all = T)
+  # Write geocoded locations to disk
+  write_csv(nyc_locs, "data/nyc_locs.csv")
+} else {
+  nyc_locs <- read_csv("data/nyc_locs.csv")
+}
 
 ##  ............................................................................
 ##  Pediacities neighborhood spatial data                                   ####
 
 # Read GeoJSON data into Spatial Polygon data frame
 nbhd_geojson <- readOGR(
-  "sandbox/pediacities-nycneighborhoods.geojson", 
+  "sandbox/nyc_neighborhoods.geojson", 
   "OGRGeoJSON",
   verbose = F
 )
@@ -170,101 +212,11 @@ nbhd_map <- nbhd_geojson %>%
 ##  ............................................................................
 ##  MapQuest Geocoding                                                      ####
 
-# MapQuest limits to 15,000 requests per key
-# Manhattan and the Bronx have 12,585 entries, so we'll split there
-mq_split <- nyc %>% 
-  mutate(manbx = boro %in% c("Manhattan", "Bronx")) %>% 
-  split(.$manbx) %>% 
-  # clean_names()
-  set_names(c("bknqs", "manbx"))
 
-# Load api keys from private directory
-source("private/api_key.R")
 
-# Function get_mq_loc
-## Mapquest location scrape function
-# Arguments
-## loc: Address or address-like location to geocode
-## id: identifier value for relational merging
-## boro: which borough group api key to use
-get_mq_loc <- function(loc, id, boro) {
-  # Return NA lat/lng for missing addresses
-  if(is.na(loc)) {
-    tibble(camis = id, lat = NA, lng = NA, status = "NA Address") %>% 
-      return()
-  }
-  # URL Template
-  mq_url <-glue("http://www.mapquestapi.com/geocoding/v1/address?key=",
-                "{get_mq_key(boro)}&location={loc}&maxResults=1") %>% 
-      URLencode()
-  # Perform the request
-  request <- mq_url %>% 
-    httr::GET() %>% 
-    content("text") %>% 
-    fromJSON()
-  # Only parse the data if the request was successful
-  if(request$info$statuscode == 0) {
-    # Pull lat/lng field
-    request %>% 
-      .[["results"]] %>% 
-      .[["locations"]] %>% 
-      first() %>% 
-      .[["latLng"]] %>% 
-      as_tibble() %>% 
-      mutate(camis = id, status = "Success") %>% 
-      rename(long = lng) %>% 
-      return()
-  } else {
-    tibble(
-      camis = id, 
-      long = NA, lat = NA, 
-      stauts = request$info$statuscode
-    ) %>% 
-      return()
-  }
 }
 
 
-### . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ..
-### Map over locations by borough                                           ####
-# Only run if it hasn't been run before
-if(!file.exists("data/nyc_locs.csv")) {
-  # Manhattan and the Bronx
-  manbx_start <- Sys.time()
-  manbx_locs <- list(
-    mq_split$manbx$address,
-    mq_split$manbx$camis,
-    "manbx"
-  ) %>% 
-    pmap_df(get_mq_loc)
-  manbx_time <- Sys.time() - manbx_start
-  
-  # Brooklyn, Queens, Staten Island
-  bknqs_start <- Sys.time()
-  bknqs_locs <- list(
-    mq_split$bknqs$address,
-    mq_split$bknqs$camis,
-    "bknqs"
-  ) %>% 
-    pmap_df(get_mq_loc)
-  
-  # Some of the geocoding wasn't accurate
-  # Filter to bounding box of our map data to double check
-  bbox <- nbhd_geojson@bbox %>% 
-    as_tibble()
-  
-  # Attach locations to nyc data
-  nyc_locs_in <- bind_rows(manbx_locs, bknqs_locs) %>% 
-    filter(between(long, bbox$min[1], bbox$max[1]),
-           between(lat, bbox$min[2], bbox$max[2]))
-  
-  nyc_locs <- left_join(nyc, nyc_locs_in)
-  
-  # Write geocoded locations to disk
-  write_csv(nyc_locs, "data/nyc_locs.csv")
-} else {
-  nyc_locs <- read_csv("data/nyc_locs.csv")
-}
 
 ##  ............................................................................
 ##  Neighborhood coding using sp::over                                      ####
